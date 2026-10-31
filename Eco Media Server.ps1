@@ -220,9 +220,9 @@ public sealed class EcoDlnaServerScan : IDisposable {
             bool valid=q.Length==2 && q[0].Length>0 && long.TryParse(q[0],out parsed) && parsed>=0 && parsed<x.Length;
             if(valid){start=parsed;if(q[1].Length>0){valid=long.TryParse(q[1],out parsed) && parsed>=start;if(valid)end=Math.Min(parsed,x.Length-1);}}
             if(!valid){c.Response.StatusCode=416;c.Response.Headers["Content-Range"]="bytes */"+x.Length;c.Response.ContentLength64=0;c.Response.Close();return;}
-            c.Response.StatusCode=206; c.Response.Headers["Content-Range"]="bytes "+start+"-"+end+"/"+x.Length;
+            c.Response.StatusCode=206;c.Response.Headers["Content-Range"]="bytes "+start+"-"+end+"/"+x.Length;
         }
-        c.Response.ContentType=x.Mime; c.Response.Headers["Accept-Ranges"]="bytes"; c.Response.ContentLength64=end-start+1;
+        c.Response.ContentType=x.Mime;c.Response.Headers["Accept-Ranges"]="bytes";c.Response.ContentLength64=end-start+1;
         if(c.Request.HttpMethod!="HEAD") using(var f=new FileStream(x.Path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite)){ f.Position=start; byte[] b=new byte[1024*256]; long left=end-start+1; while(left>0){int n=f.Read(b,0,(int)Math.Min(b.Length,left));if(n<=0)break;c.Response.OutputStream.Write(b,0,n);left-=n;}}
         c.Response.Close(); Log("STREAM  "+x.Title+"  -> "+c.Request.RemoteEndPoint.Address);
     }
@@ -293,20 +293,24 @@ try { Add-Type -TypeDefinition $engine -Language CSharp -ErrorAction Stop } catc
    <StackPanel Orientation="Horizontal" Margin="24,12"><TextBlock Text="▷" FontSize="44" Foreground="{StaticResource Accent}" Margin="0,-6,18,0"/><StackPanel><TextBlock Text="ECO MEDIA SERVER" FontFamily="Cascadia Mono" FontSize="25" FontWeight="Bold" Foreground="{StaticResource Accent}"/><TextBlock Text="LOCAL MEDIA TRANSMISSION SYSTEM" FontFamily="Cascadia Mono" FontSize="11" Foreground="{StaticResource Muted}"/></StackPanel></StackPanel>
    <StackPanel Grid.Column="1" Orientation="Horizontal"><Button x:Name="MinButton" Content="—" Width="52" BorderThickness="0" Background="Transparent"/><Button x:Name="CloseButton" Content="×" FontSize="22" Width="52" BorderThickness="0" Background="Transparent"/></StackPanel>
   </Grid>
-  <!-- tabs/status -->
   <Grid Grid.Row="1"><TextBlock x:Name="TopStatus" Text="ONLINE" Visibility="Collapsed"/></Grid>
   <!-- content -->
   <Grid Grid.Row="2" Margin="20,18,20,14"><Grid.RowDefinitions><RowDefinition Height="190"/><RowDefinition Height="12"/><RowDefinition Height="*"/></Grid.RowDefinitions>
    <Border x:Name="DropZone" BorderBrush="{StaticResource Accent}" BorderThickness="1" CornerRadius="6" Background="#97101D1F"><StackPanel VerticalAlignment="Center"><TextBlock Text="⇩" FontSize="46" HorizontalAlignment="Center" Foreground="{StaticResource Accent}"/><TextBlock Text="DROP MEDIA HERE" FontFamily="Cascadia Mono" FontSize="26" FontWeight="Bold" HorizontalAlignment="Center" Foreground="{StaticResource Accent}"/><TextBlock Text="Files or folders" HorizontalAlignment="Center" Foreground="#A2BBB8" Margin="0,4,0,15"/><Button x:Name="BrowseButton" Content="SELECT FILES" HorizontalAlignment="Center" Width="240"/></StackPanel></Border>
    <Border Grid.Row="2" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="6" Background="#B0071112"><Grid><Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition Height="*"/></Grid.RowDefinitions><Grid Grid.Row="0"><TextBlock x:Name="ItemsHeader" Text="SHARED ITEMS ( 0 )" Margin="14,13" FontFamily="Cascadia Mono" Foreground="{StaticResource Accent}"/><TextBlock x:Name="SizeHeader" Text="TOTAL SIZE: 0 B" HorizontalAlignment="Right" Margin="0,13,16,0" FontFamily="Cascadia Mono" Foreground="#91A7A5"/></Grid><DataGrid x:Name="MediaList" Grid.Row="1" AutoGenerateColumns="False" CanUserAddRows="False" CanUserDeleteRows="False" CanUserResizeRows="False" IsReadOnly="True" SelectionMode="Extended" SelectionUnit="FullRow" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#183638" RowHeight="27" ColumnHeaderHeight="30" RowBackground="#70071112" AlternatingRowBackground="#70101C1E" Background="Transparent" BorderThickness="0" Foreground="#DDE9E7" FontFamily="Cascadia Mono">
-      <DataGrid.Resources><Style x:Key="CellText" TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="TextTrimming" Value="CharacterEllipsis"/></Style><Style x:Key="NameCellText" TargetType="TextBlock" BasedOn="{StaticResource CellText}"><Setter Property="Margin" Value="10,0,0,0"/></Style><Style TargetType="DataGridColumnHeader"><Setter Property="Background" Value="#0C181A"/><Setter Property="Foreground" Value="#789291"/><Setter Property="BorderBrush" Value="#254547"/><Setter Property="BorderThickness" Value="0,0,0,1"/><Setter Property="Padding" Value="12,8"/><Setter Property="FontWeight" Value="Normal"/></Style><Style TargetType="DataGridCell"><Setter Property="BorderThickness" Value="0"/><Setter Property="Padding" Value="8,0"/><Setter Property="VerticalContentAlignment" Value="Stretch"/><Setter Property="ToolTip" Value="{Binding Path}"/></Style></DataGrid.Resources>
-      <DataGrid.Columns>
-       <DataGridTextColumn Header="NAME" ElementStyle="{StaticResource NameCellText}" Binding="{Binding Name}" SortMemberPath="Name" Width="*"/>
-       <DataGridTextColumn Header="TYPE" ElementStyle="{StaticResource CellText}" Binding="{Binding Type}" SortMemberPath="Type" Width="110"/>
-       <DataGridTextColumn Header="SIZE" ElementStyle="{StaticResource CellText}" Binding="{Binding Size}" SortMemberPath="SizeBytes" Width="110"/>
-       <DataGridTemplateColumn Header="ACTION" Width="105"><DataGridTemplateColumn.CellTemplate><DataTemplate><Button Content="REMOVE" Tag="{Binding Id}" Margin="0" Padding="10,0" VerticalAlignment="Stretch" HorizontalAlignment="Stretch" ToolTip="Stop sharing this item. The file will not be deleted."/></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
-      </DataGrid.Columns>
-     </DataGrid></Grid></Border>
+<DataGrid.Resources>
+<Style x:Key="CellText" TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="TextTrimming" Value="CharacterEllipsis"/></Style>
+<Style x:Key="NameCellText" TargetType="TextBlock" BasedOn="{StaticResource CellText}"><Setter Property="Margin" Value="10,0,0,0"/></Style>
+<Style x:Key="CenterCellText" TargetType="TextBlock" BasedOn="{StaticResource CellText}"><Setter Property="HorizontalAlignment" Value="Center"/></Style>
+<Style x:Key="CenterHeader" TargetType="DataGridColumnHeader"><Setter Property="Background" Value="#0C181A"/><Setter Property="Foreground" Value="#789291"/><Setter Property="BorderBrush" Value="#254547"/><Setter Property="BorderThickness" Value="0,0,0,1"/><Setter Property="Padding" Value="0"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="HorizontalContentAlignment" Value="Center"/><Setter Property="VerticalContentAlignment" Value="Center"/></Style>
+<Style TargetType="DataGridColumnHeader"><Setter Property="Background" Value="#0C181A"/><Setter Property="Foreground" Value="#789291"/><Setter Property="BorderBrush" Value="#254547"/><Setter Property="BorderThickness" Value="0,0,0,1"/><Setter Property="Padding" Value="12,8"/><Setter Property="FontWeight" Value="Normal"/></Style>
+<Style TargetType="DataGridCell"><Setter Property="BorderThickness" Value="0"/><Setter Property="Padding" Value="8,0"/><Setter Property="VerticalContentAlignment" Value="Stretch"/><Setter Property="ToolTip" Value="{Binding Path}"/></Style>
+</DataGrid.Resources><DataGrid.Columns>
+<DataGridTextColumn Header="NAME" ElementStyle="{StaticResource NameCellText}" Binding="{Binding Name}" SortMemberPath="Name" Width="*"/>
+<DataGridTextColumn Header="TYPE" HeaderStyle="{StaticResource CenterHeader}" ElementStyle="{StaticResource CenterCellText}" Binding="{Binding Type}" SortMemberPath="Type" Width="110"/>
+<DataGridTextColumn Header="SIZE" HeaderStyle="{StaticResource CenterHeader}" ElementStyle="{StaticResource CenterCellText}" Binding="{Binding Size}" SortMemberPath="SizeBytes" Width="110"/>
+<DataGridTemplateColumn Header="ACTION" HeaderStyle="{StaticResource CenterHeader}" Width="105"><DataGridTemplateColumn.CellTemplate><DataTemplate><Button Content="REMOVE" Tag="{Binding Id}" Margin="0" Padding="10,0" VerticalAlignment="Stretch" HorizontalAlignment="Stretch" ToolTip="Stop sharing this item. The file will not be deleted."/></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
+</DataGrid.Columns></DataGrid></Grid></Border>
   </Grid>
   <!-- server details -->
   <Border Grid.Row="3" Margin="20,0" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="6" Background="#B0081213"><Grid Margin="20,14"><Grid.ColumnDefinitions><ColumnDefinition Width="250"/><ColumnDefinition Width="*"/><ColumnDefinition Width="220"/></Grid.ColumnDefinitions><StackPanel><TextBlock Text="SERVER" FontFamily="Cascadia Mono" Foreground="{StaticResource Accent}"/><StackPanel Orientation="Horizontal" Margin="0,15,0,0"><Ellipse Width="24" Height="24" Fill="{StaticResource Accent}" Margin="0,0,14,0"/><StackPanel><TextBlock Text="ONLINE" FontFamily="Cascadia Mono" FontSize="18" Foreground="{StaticResource Accent}"/></StackPanel></StackPanel></StackPanel><Grid Grid.Column="1"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions><StackPanel><TextBlock Text="Address (IPv4)" Foreground="#78908E"/><TextBlock x:Name="AddressText" Text="Starting..." FontFamily="Cascadia Mono" Margin="0,5,0,12"/></StackPanel><StackPanel Grid.Column="1"><TextBlock Text="Shared items" Foreground="#78908E"/><TextBlock x:Name="CountText" Text="0" FontFamily="Cascadia Mono" Margin="0,5,0,12"/></StackPanel></Grid><StackPanel Grid.Column="2" VerticalAlignment="Center"><Button x:Name="ClearButton" Content="CLEAR SHARED ITEMS" Height="38"/></StackPanel></Grid></Border>
@@ -328,11 +332,8 @@ if ($null -eq $server) {
 function Format-Bytes([long]$n) { if($n -ge 1GB){'{0:N1} GB' -f ($n/1GB)} elseif($n -ge 1MB){'{0:N1} MB' -f ($n/1MB)} elseif($n -ge 1KB){'{0:N1} KB' -f ($n/1KB)} else{"$n B"} }
 function Refresh-List {
     $MediaList.Items.Clear()
-    foreach($i in $server.Snapshot()) {
-        $type = if($i.Mime.StartsWith('video/')){'VIDEO'}elseif($i.Mime.StartsWith('audio/')){'AUDIO'}elseif($i.Mime.StartsWith('image/')){'IMAGE'}else{'OTHER'}
-        [void]$MediaList.Items.Add([pscustomobject]@{Id=$i.Id;Name=[IO.Path]::GetFileName($i.Path);Type=$type;Size=(Format-Bytes $i.Length);SizeBytes=[long]$i.Length;Path=$i.Path})
-    }
-    $ItemsHeader.Text = "SHARED MEDIA ( $($server.ItemCount) )"; $SizeHeader.Text = "TOTAL: $(Format-Bytes $server.TotalBytes)"; $CountText.Text = "$($server.ItemCount) ($(Format-Bytes $server.TotalBytes))"
+    foreach($i in $server.Snapshot()) {$type=if($i.Mime.StartsWith('video/')){'VIDEO'}elseif($i.Mime.StartsWith('audio/')){'AUDIO'}elseif($i.Mime.StartsWith('image/')){'IMAGE'}else{'OTHER'};[void]$MediaList.Items.Add([pscustomobject]@{Id=$i.Id;Name=[IO.Path]::GetFileName($i.Path);Type=$type;Size=(Format-Bytes $i.Length);SizeBytes=[long]$i.Length;Path=$i.Path})}
+    $ItemsHeader.Text="SHARED MEDIA ( $($server.ItemCount) )";$SizeHeader.Text="TOTAL: $(Format-Bytes $server.TotalBytes)";$CountText.Text="$($server.ItemCount) ($(Format-Bytes $server.TotalBytes))"
 }
 function Add-Path([string]$p) {
     if([IO.File]::Exists($p)){ $server.Add($p) }
@@ -358,7 +359,7 @@ $window.Add_DragOver({$_.Effects='Copy';$_.Handled=$true;$DropZone.Background='#
 $window.Add_DragLeave({$DropZone.Background='#97101D1F'})
 $window.Add_Drop({$DropZone.Background='#97101D1F'; if($_.Data.GetDataPresent([Windows.DataFormats]::FileDrop)){foreach($p in $_.Data.GetData([Windows.DataFormats]::FileDrop)){Add-Path $p};Refresh-List}})
 $MediaList.AddHandler([Windows.Controls.Button]::ClickEvent,[Windows.RoutedEventHandler]{param($sender,$e);$button=$e.OriginalSource;if($button -is [Windows.Controls.Button] -and $button.Tag){$server.Remove([string]$button.Tag);Refresh-List;$e.Handled=$true}})
-$MediaList.Add_KeyDown({if($_.Key -eq [Windows.Input.Key]::Delete){$ids=@($MediaList.SelectedItems | ForEach-Object {$_.Id});foreach($id in $ids){$server.Remove([string]$id)};if($ids.Count){Refresh-List};$_.Handled=$true}})
+$MediaList.Add_KeyDown({if($_.Key -eq [Windows.Input.Key]::Delete){$ids=@($MediaList.SelectedItems|ForEach-Object{$_.Id});foreach($id in $ids){$server.Remove([string]$id)};if($ids.Count){Refresh-List};$_.Handled=$true}})
 $ClearButton.Add_Click({if($server.ItemCount -eq 0){return};$answer=[System.Windows.MessageBox]::Show("Stop sharing all $($server.ItemCount) items?`n`nFiles on disk will not be deleted.",'Eco Media Server',[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Question);if($answer -eq [System.Windows.MessageBoxResult]::Yes){foreach($i in $server.Snapshot()){$server.Remove($i.Id)};Refresh-List}})
 $timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromMilliseconds(700); $timer.Add_Tick({$l=$server.DrainLogs();if($l.Count){$FooterText.Text='■  '+$l[-1]}});$timer.Start()
 $window.Add_Closing({$timer.Stop();$server.Dispose()})
