@@ -7,6 +7,11 @@ A lightweight, portable, and lightning-fast local DLNA/UPnP media server packed 
 
 Built as part of the **eco-by-different** utility collection.
 
+## Antivirus Notice (False Positives)
+
+The `.exe` binary is generated, which some sensitive antivirus engines, including Windows Defender or machine-learning based scanners, may flag as a false positive.
+
+The underlying PowerShell script is clean. If your system blocks the `.exe`, you can safely run the raw `Eco Media Server.ps1` script instead.
 
 ## Screenshot
 
