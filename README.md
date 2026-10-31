@@ -24,6 +24,8 @@ The underlying PowerShell script is clean. If your system blocks the `.exe`, you
 * **No Admin Rights Needed:** Runs completely in user mode. No UAC elevation or complex Windows Firewall rule tweaks required.
 * **100% Private:** No cloud, no accounts, no data collection (LOCAL | PRIVATE | NO CLOUD).
 
+*Note: On the first launch, Windows Firewall will prompt you to allow network access. Make sure to check **Private networks** so your Smart TV or other devices can discover and connect to the server.*
+
 ## How to Run
 Simply download and run `EcoMediaServer.exe`. 
 
