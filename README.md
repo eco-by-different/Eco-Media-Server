@@ -27,7 +27,7 @@ The underlying PowerShell script is clean. If your system blocks the `.exe`, you
 *Note: On the first launch, Windows Firewall will prompt you to allow network access. Make sure to check **Private networks** so your Smart TV or other devices can discover and connect to the server.*
 
 ## How to Run
-Simply download and run `EcoMediaServer.exe`. 
+Simply download and run `Eco Media Server.exe`. 
 
 *Note: Under the hood, it utilizes an optimized PowerShell script paired with a WPF graphical user interface and an embedded C# network engine compiled directly at runtime.*
 
