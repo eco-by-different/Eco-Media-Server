@@ -15,7 +15,7 @@ The underlying PowerShell script is clean. If your system blocks the `.exe`, you
 
 ## Screenshot
 
-![Eco-Media-server 1.0](Eco%20Media%20Server.png)
+![Eco-Media-server 1.0](EMS.png)
 
 ## Key Features
 * **Single-file Architecture:** No installation, no registry bloat, and a tiny footprint of just ~66 KB.
