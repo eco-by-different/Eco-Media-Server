@@ -1,8 +1,16 @@
+![Repo size](https://img.shields.io/github/repo-size/eco-by-different/Eco-Media-server)
+![Last commit](https://img.shields.io/github/last-commit/eco-by-different/Eco-Media-server)
+
 # Eco Media Server
 
 A lightweight, portable, and lightning-fast local DLNA/UPnP media server packed into a single executable. Designed for ultimate privacy and efficiency with zero setup required.
 
 Built as part of the **eco-by-different** utility collection.
+
+
+## Screenshot
+
+![Eco-Media-server 1.0](Eco%20Media%20Server.png)
 
 ## 🚀 Key Features
 * **Single-file Architecture:** No installation, no registry bloat, and a tiny footprint of just ~66 KB.
