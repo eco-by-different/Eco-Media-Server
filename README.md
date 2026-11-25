@@ -35,7 +35,7 @@ Simply download and run `Eco Media Server.exe`.
 
 Version 1.1 
 
-- Added DLNA seek support for MKV, MP4/M4V, and AVI playback.
+- Improved DLNA compatibility to enable video seeking on supported TVs.
 
 ## License
 This project is licensed under the **MIT License** — feel free to modify, share, and use the code as you wish, provided that the original author credit remains intact.
