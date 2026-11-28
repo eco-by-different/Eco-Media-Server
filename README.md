@@ -33,6 +33,11 @@ Simply download and run `Eco Media Server.exe`.
 
 ## Changelog ##
 
+Version 1.2
+
+- Fixed .mov files being advertised with an incorrect MIME type; they are now reported as video/quicktime with matching DLNA streaming capabilities.
+- Improved LAN interface selection using Windows routing for SSDP multicast. HTTP now binds to the selected private IPv4 address, and ambiguous interface selection reports an error instead of choosing arbitrarily.
+
 Version 1.1 
 
 - Improved DLNA compatibility to enable video seeking on supported TVs.
