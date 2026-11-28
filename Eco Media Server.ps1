@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 <#
-  Eco Media Server - single-file WPF/DLNA prototype
+  Eco Media Server 1.2 - single-file WPF/DLNA server
   Run: powershell.exe -ExecutionPolicy Bypass -File .\EcoMediaServer.ps1
   Windows PowerShell 5.1 (STA) recommended.
 #>
@@ -13,6 +13,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 # Runs as the current user so Explorer drag-and-drop remains available.
 # Network access is handled by a user-mode TCP listener; no URLACL or UAC elevation is needed.
 
+# Load WPF and hide the console used to launch the desktop application.
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml
 Add-Type @"
 using System;
@@ -25,10 +26,12 @@ public static class ConsoleWindow {
 "@
 [ConsoleWindow]::Hide()
 
+# Embedded C# engine: HTTP handling, media catalog, UPnP actions, and SSDP discovery.
 $engine = @'
 using System;
 using System.IO;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
@@ -36,8 +39,10 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Security;
+using System.Runtime.InteropServices;
 
 
+// Parsed HTTP request data and response writer.
 public sealed class SimpleHttpRequest {
     public string HttpMethod, AbsolutePath, Body;
     public readonly Dictionary<string,string> Headers = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
@@ -64,6 +69,7 @@ public sealed class SimpleHttpResponse {
     public void Close() { Start(); stream.Flush(); }
 }
 
+// Reads one HTTP request and creates its response context.
 public sealed class SimpleHttpContext {
     public SimpleHttpRequest Request;
     public SimpleHttpResponse Response;
@@ -81,12 +87,18 @@ public sealed class SimpleHttpContext {
     }
 }
 
+// Metadata for one file shared by the server.
 public sealed class EmsItem {
     public string Id, Path, Title, Mime;
     public long Length;
 }
 
+// Owns the media catalog, network listeners, and their worker threads.
 public sealed class EcoDlnaServerScan : IDisposable {
+    const string Version = "1.2";
+    [DllImport("iphlpapi.dll", ExactSpelling=true)]
+    static extern int GetBestInterface(uint destinationAddress, out uint interfaceIndex);
+
     readonly object sync = new object();
     readonly List<EmsItem> items = new List<EmsItem>();
     readonly ConcurrentQueue<string> logs = new ConcurrentQueue<string>();
@@ -120,7 +132,7 @@ public sealed class EcoDlnaServerScan : IDisposable {
     public void Start(int requestedPort) {
         if (Running) return;
         host = FindIPv4(); port = requestedPort; cts = new CancellationTokenSource();
-        http = new TcpListener(IPAddress.Any, port);
+        http = new TcpListener(IPAddress.Parse(host), port);
         http.Start();
         Running=true;
         httpThread=new Thread(HttpLoop){IsBackground=true}; httpThread.Start();
@@ -135,9 +147,47 @@ public sealed class EcoDlnaServerScan : IDisposable {
     }
 
     string FindIPv4() {
-        foreach(var a in Dns.GetHostEntry(Dns.GetHostName()).AddressList)
-            if(a.AddressFamily==AddressFamily.InterNetwork && !IPAddress.IsLoopback(a)) return a.ToString();
-        return "127.0.0.1";
+        var candidates = new List<Tuple<int,IPAddress,bool,string>>();
+        foreach(NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces()) {
+            if(nic.OperationalStatus!=OperationalStatus.Up ||
+                nic.NetworkInterfaceType==NetworkInterfaceType.Loopback ||
+                nic.NetworkInterfaceType==NetworkInterfaceType.Tunnel) continue;
+            var properties=nic.GetIPProperties();
+            var ipv4=properties.GetIPv4Properties();
+            if(ipv4==null) continue;
+            bool hasGateway=properties.GatewayAddresses.Any(g =>
+                g.Address.AddressFamily==AddressFamily.InterNetwork && !g.Address.Equals(IPAddress.Any));
+            foreach(var unicast in properties.UnicastAddresses) {
+                IPAddress address=unicast.Address;
+                if(address.AddressFamily==AddressFamily.InterNetwork && IsPrivateIPv4(address))
+                    candidates.Add(Tuple.Create(ipv4.Index,address,hasGateway,nic.Name));
+            }
+        }
+
+        if(candidates.Count==0)
+            throw new InvalidOperationException("No active private IPv4 network interface was found.");
+
+        byte[] group=IPAddress.Parse("239.255.255.250").GetAddressBytes();
+        uint bestIndex;
+        bool hasGatewayCandidate=candidates.Any(c=>c.Item3);
+        if(GetBestInterface(BitConverter.ToUInt32(group,0),out bestIndex)==0) {
+            var routed=candidates.FirstOrDefault(c=>c.Item1==(int)bestIndex && (c.Item3 || !hasGatewayCandidate));
+            if(routed!=null) return routed.Item2.ToString();
+        }
+
+        var gatewayCandidates=candidates.Where(c=>c.Item3).ToArray();
+        if(gatewayCandidates.Select(c=>c.Item1).Distinct().Count()==1)
+            return gatewayCandidates[0].Item2.ToString();
+        if(candidates.Select(c=>c.Item1).Distinct().Count()==1)
+            return candidates[0].Item2.ToString();
+
+        string found=String.Join("; ",candidates.Select(c=>c.Item4+" ("+c.Item2+")").Distinct());
+        throw new InvalidOperationException("Could not select one LAN interface for SSDP. Available interfaces: "+found);
+    }
+
+    static bool IsPrivateIPv4(IPAddress address) {
+        byte[] b=address.GetAddressBytes();
+        return b[0]==10 || (b[0]==172 && b[1]>=16 && b[1]<=31) || (b[0]==192 && b[1]==168);
     }
 
     void HttpLoop() {
@@ -153,6 +203,7 @@ public sealed class EcoDlnaServerScan : IDisposable {
             Handle(c);
         } catch(Exception ex) { if(Running) Log("HTTP ERROR  "+ex.Message); }
     }
+    // Routes HTTP requests to device, SOAP, event, or media handlers.
     void Handle(SimpleHttpContext c) {
         try {
             string p=c.Request.AbsolutePath, method=c.Request.HttpMethod.ToUpperInvariant();
@@ -179,12 +230,15 @@ public sealed class EcoDlnaServerScan : IDisposable {
         byte[] b=Encoding.UTF8.GetBytes(text); c.Response.ContentType="text/xml; charset=utf-8"; c.Response.ContentLength64=b.Length;
         if(c.Request.HttpMethod!="HEAD") c.Response.OutputStream.Write(b,0,b.Length); c.Response.Close();
     }
-    string DeviceXml() { return "<?xml version=\"1.0\"?><root xmlns=\"urn:schemas-upnp-org:device-1-0\" xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\" xmlns:sec=\"http://www.sec.co.kr/dlna\"><specVersion><major>1</major><minor>0</minor></specVersion><URLBase>http://"+Address+"/</URLBase><device><deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType><friendlyName>Eco Media Server</friendlyName><manufacturer>eco-by-different</manufacturer><modelName>Eco Media Server</modelName><modelNumber>0.4</modelNumber><serialNumber>2026</serialNumber><dlna:X_DLNADOC>DMS-1.50</dlna:X_DLNADOC><sec:ProductCap>smi,DCM10,getMediaInfo.sec,getCaptionInfo.sec</sec:ProductCap><sec:X_ProductCap>smi,DCM10,getMediaInfo.sec,getCaptionInfo.sec</sec:X_ProductCap><UDN>"+uuid+"</UDN><serviceList><service><serviceType>urn:schemas-upnp-org:service:ContentDirectory:1</serviceType><serviceId>urn:upnp-org:serviceId:ContentDirectory</serviceId><controlURL>/content/control</controlURL><eventSubURL>/content/event</eventSubURL><SCPDURL>/content/scpd.xml</SCPDURL></service><service><serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType><serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId><controlURL>/connection/control</controlURL><eventSubURL>/connection/event</eventSubURL><SCPDURL>/connection/scpd.xml</SCPDURL></service></serviceList></device></root>"; }
+    // UPnP device and service descriptions.
+    string DeviceXml() { return "<?xml version=\"1.0\"?><root xmlns=\"urn:schemas-upnp-org:device-1-0\" xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\" xmlns:sec=\"http://www.sec.co.kr/dlna\"><specVersion><major>1</major><minor>0</minor></specVersion><URLBase>http://"+Address+"/</URLBase><device><deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType><friendlyName>Eco Media Server</friendlyName><manufacturer>eco-by-different</manufacturer><modelName>Eco Media Server</modelName><modelNumber>"+Version+"</modelNumber><serialNumber>2026</serialNumber><dlna:X_DLNADOC>DMS-1.50</dlna:X_DLNADOC><sec:ProductCap>smi,DCM10,getMediaInfo.sec,getCaptionInfo.sec</sec:ProductCap><sec:X_ProductCap>smi,DCM10,getMediaInfo.sec,getCaptionInfo.sec</sec:X_ProductCap><UDN>"+uuid+"</UDN><serviceList><service><serviceType>urn:schemas-upnp-org:service:ContentDirectory:1</serviceType><serviceId>urn:upnp-org:serviceId:ContentDirectory</serviceId><controlURL>/content/control</controlURL><eventSubURL>/content/event</eventSubURL><SCPDURL>/content/scpd.xml</SCPDURL></service><service><serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType><serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId><controlURL>/connection/control</controlURL><eventSubURL>/connection/event</eventSubURL><SCPDURL>/connection/scpd.xml</SCPDURL></service></serviceList></device></root>"; }
     string ContentScpd() { return "<?xml version=\"1.0\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList><action><name>Browse</name><argumentList><argument><name>ObjectID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ObjectID</relatedStateVariable></argument><argument><name>BrowseFlag</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_BrowseFlag</relatedStateVariable></argument><argument><name>Filter</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Filter</relatedStateVariable></argument><argument><name>StartingIndex</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Index</relatedStateVariable></argument><argument><name>RequestedCount</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>SortCriteria</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SortCriteria</relatedStateVariable></argument><argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument><argument><name>NumberReturned</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>TotalMatches</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>UpdateID</name><direction>out</direction><relatedStateVariable>SystemUpdateID</relatedStateVariable></argument></argumentList></action><action><name>GetSearchCapabilities</name><argumentList><argument><name>SearchCaps</name><direction>out</direction><relatedStateVariable>SearchCapabilities</relatedStateVariable></argument></argumentList></action><action><name>GetSortCapabilities</name><argumentList><argument><name>SortCaps</name><direction>out</direction><relatedStateVariable>SortCapabilities</relatedStateVariable></argument></argumentList></action><action><name>GetSystemUpdateID</name><argumentList><argument><name>Id</name><direction>out</direction><relatedStateVariable>SystemUpdateID</relatedStateVariable></argument></argumentList></action></actionList><serviceStateTable><stateVariable sendEvents=\"yes\"><name>SystemUpdateID</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>SearchCapabilities</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>SortCapabilities</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_ObjectID</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_BrowseFlag</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Filter</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Index</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Count</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_SortCriteria</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Result</name><dataType>string</dataType></stateVariable></serviceStateTable></scpd>"; }
     string ConnectionScpd() { return "<?xml version=\"1.0\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList><action><name>GetProtocolInfo</name><argumentList><argument><name>Source</name><direction>out</direction><relatedStateVariable>SourceProtocolInfo</relatedStateVariable></argument><argument><name>Sink</name><direction>out</direction><relatedStateVariable>SinkProtocolInfo</relatedStateVariable></argument></argumentList></action><action><name>GetCurrentConnectionIDs</name><argumentList><argument><name>ConnectionIDs</name><direction>out</direction><relatedStateVariable>CurrentConnectionIDs</relatedStateVariable></argument></argumentList></action><action><name>GetCurrentConnectionInfo</name><argumentList><argument><name>ConnectionID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument><argument><name>RcsID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_RcsID</relatedStateVariable></argument><argument><name>AVTransportID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_AVTransportID</relatedStateVariable></argument><argument><name>ProtocolInfo</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ProtocolInfo</relatedStateVariable></argument><argument><name>PeerConnectionManager</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionManager</relatedStateVariable></argument><argument><name>PeerConnectionID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument><argument><name>Direction</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Direction</relatedStateVariable></argument><argument><name>Status</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionStatus</relatedStateVariable></argument></argumentList></action></actionList><serviceStateTable><stateVariable sendEvents=\"yes\"><name>SourceProtocolInfo</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>SinkProtocolInfo</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>CurrentConnectionIDs</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_ConnectionID</name><dataType>i4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_RcsID</name><dataType>i4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_AVTransportID</name><dataType>i4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_ProtocolInfo</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_ConnectionManager</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Direction</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_ConnectionStatus</name><dataType>string</dataType></stateVariable></serviceStateTable></scpd>"; }
     string SoapValue(string body,string name) { if(String.IsNullOrEmpty(body))return "";string a="<"+name+">",z="</"+name+">";int i=body.IndexOf(a,StringComparison.OrdinalIgnoreCase);if(i<0)return "";i+=a.Length;int j=body.IndexOf(z,i,StringComparison.OrdinalIgnoreCase);return j<0?"":body.Substring(i,j-i); }
     string DlnaClass(string mime) { if(mime.StartsWith("audio/"))return "object.item.audioItem.musicTrack";if(mime.StartsWith("image/"))return "object.item.imageItem.photo";return "object.item.videoItem"; }
+    static bool IsOp11Format(string mime) { return mime=="video/mp4"||mime=="video/x-matroska"||mime=="video/x-msvideo"||mime=="video/quicktime"; }
 
+    // SOAP actions for ContentDirectory and ConnectionManager.
     void ContentControl(SimpleHttpContext c) {
         string a=Action(c);
         if(a=="Browse") Browse(c);
@@ -200,16 +254,17 @@ public sealed class EcoDlnaServerScan : IDisposable {
         else if(a=="GetCurrentConnectionInfo") Soap(c,"ConnectionManager","GetCurrentConnectionInfo","<RcsID>-1</RcsID><AVTransportID>-1</AVTransportID><ProtocolInfo></ProtocolInfo><PeerConnectionManager></PeerConnectionManager><PeerConnectionID>-1</PeerConnectionID><Direction>Output</Direction><Status>Unknown</Status>");
         else SoapFault(c,401,"Invalid Action");
     }
+    // Catalog browsing, advertised protocols, and byte-range media delivery.
     void Browse(SimpleHttpContext c) {
         bool metadata=SoapValue(c.Request.Body,"BrowseFlag").Equals("BrowseMetadata",StringComparison.OrdinalIgnoreCase);int first=0,count=0;Int32.TryParse(SoapValue(c.Request.Body,"StartingIndex"),out first);Int32.TryParse(SoapValue(c.Request.Body,"RequestedCount"),out count);
         EmsItem[] all=Snapshot();IEnumerable<EmsItem> q=all.Skip(first);if(count>0)q=q.Take(count);EmsItem[] selected=q.ToArray();var sb=new StringBuilder();
         if(metadata)sb.Append("<container id=\"0\" parentID=\"-1\" restricted=\"1\" searchable=\"0\" childCount=\"").Append(all.Length).Append("\"><dc:title>Eco Media Server</dc:title><upnp:class>object.container.storageFolder</upnp:class></container>");
-        else foreach(EmsItem x in selected){string t=SecurityElement.Escape(x.Title),u="http://"+Address+"/media/"+x.Id;sb.Append("<item id=\"").Append(x.Id).Append("\" parentID=\"0\" restricted=\"1\"><dc:title>").Append(t).Append("</dc:title><upnp:class>").Append(DlnaClass(x.Mime)).Append("</upnp:class><res protocolInfo=\"http-get:*:").Append(x.Mime).Append(":DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\" size=\"").Append(x.Length).Append("\">").Append(u).Append("</res></item>");}
+        else foreach(EmsItem x in selected){string t=SecurityElement.Escape(x.Title),u="http://"+Address+"/media/"+x.Id,op=IsOp11Format(x.Mime)?"11":"01";sb.Append("<item id=\"").Append(x.Id).Append("\" parentID=\"0\" restricted=\"1\"><dc:title>").Append(t).Append("</dc:title><upnp:class>").Append(DlnaClass(x.Mime)).Append("</upnp:class><res protocolInfo=\"http-get:*:").Append(x.Mime).Append(":DLNA.ORG_OP=").Append(op).Append(";DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\" size=\"").Append(x.Length).Append("\">").Append(u).Append("</res></item>");}
         int returned=metadata?1:selected.Length,total=metadata?1:all.Length;string didl="<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:sec=\"http://www.sec.co.kr/\">"+sb+"</DIDL-Lite>";
         string body="<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><Result>"+SecurityElement.Escape(didl)+"</Result><NumberReturned>"+returned+"</NumberReturned><TotalMatches>"+total+"</TotalMatches><UpdateID>1</UpdateID></u:BrowseResponse></s:Body></s:Envelope>";Xml(c,body);Log("CATALOG "+(metadata?"METADATA":"CHILDREN")+" ITEMS="+returned);
     }
     void ProtocolInfo(SimpleHttpContext c) {
-        string source=String.Join(",",new[]{"video/mp4","video/x-matroska","video/x-msvideo","video/mpeg","video/quicktime","audio/mpeg","audio/flac","audio/wav","image/jpeg","image/png"}.Select(x=>"http-get:*:"+x+":DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"));
+        string source=String.Join(",",new[]{"video/mp4","video/x-matroska","video/x-msvideo","video/mpeg","video/quicktime","audio/mpeg","audio/flac","audio/wav","image/jpeg","image/png"}.Select(x=>"http-get:*:"+x+":DLNA.ORG_OP="+(IsOp11Format(x)?"11":"01")+";DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"));
         Soap(c,"ConnectionManager","GetProtocolInfo","<Source>"+SecurityElement.Escape(source)+"</Source><Sink></Sink>");
     }
     void Media(SimpleHttpContext c,string id) {
@@ -222,10 +277,16 @@ public sealed class EcoDlnaServerScan : IDisposable {
             if(!valid){c.Response.StatusCode=416;c.Response.Headers["Content-Range"]="bytes */"+x.Length;c.Response.ContentLength64=0;c.Response.Close();return;}
             c.Response.StatusCode=206;c.Response.Headers["Content-Range"]="bytes "+start+"-"+end+"/"+x.Length;
         }
-        c.Response.ContentType=x.Mime;c.Response.Headers["Accept-Ranges"]="bytes";c.Response.ContentLength64=end-start+1;
+        c.Response.ContentType=x.Mime;c.Response.Headers["Accept-Ranges"]="bytes";
+        if(IsOp11Format(x.Mime)){
+            c.Response.Headers["transferMode.dlna.org"]="Streaming";
+            c.Response.Headers["contentFeatures.dlna.org"]="DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
+        }
+        c.Response.ContentLength64=end-start+1;
         if(c.Request.HttpMethod!="HEAD") using(var f=new FileStream(x.Path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite)){ f.Position=start; byte[] b=new byte[1024*256]; long left=end-start+1; while(left>0){int n=f.Read(b,0,(int)Math.Min(b.Length,left));if(n<=0)break;c.Response.OutputStream.Write(b,0,n);left-=n;}}
         c.Response.Close(); Log("STREAM  "+x.Title+"  -> "+c.Request.RemoteEndPoint.Address);
     }
+    // SSDP discovery responses and periodic alive/byebye announcements.
     string[] SsdpTypes() { return new[]{
         "upnp:rootdevice",
         uuid,
@@ -253,7 +314,7 @@ public sealed class EcoDlnaServerScan : IDisposable {
         } catch(Exception ex) { if(Running){Log("SSDP ERROR  "+ex.Message);Thread.Sleep(100);} }
     }
     void Reply(IPEndPoint ep,string st) {
-        string m="HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nDATE: "+DateTime.UtcNow.ToString("R")+"\r\nEXT:\r\nLOCATION: http://"+Address+"/device.xml\r\nSERVER: Windows/10.0 UPnP/1.0 DLNADOC/1.50 EcoMediaServer/0.4\r\nST: "+st+"\r\nUSN: "+Usn(st)+"\r\nBOOTID.UPNP.ORG: 1\r\nCONFIGID.UPNP.ORG: 1\r\n\r\n";
+        string m="HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nDATE: "+DateTime.UtcNow.ToString("R")+"\r\nEXT:\r\nLOCATION: http://"+Address+"/device.xml\r\nSERVER: Windows/10.0 UPnP/1.0 DLNADOC/1.50 EcoMediaServer/"+Version+"\r\nST: "+st+"\r\nUSN: "+Usn(st)+"\r\nBOOTID.UPNP.ORG: 1\r\nCONFIGID.UPNP.ORG: 1\r\n\r\n";
         byte[] b=Encoding.ASCII.GetBytes(m); ssdp.Send(b,b.Length,ep); Log("SSDP REPLY  "+ep.Address+"  "+st);
     }
     void NotifyLoop() {
@@ -261,16 +322,19 @@ public sealed class EcoDlnaServerScan : IDisposable {
     }
     void Notify(string nts) { foreach(var t in SsdpTypes()) NotifyOne(nts,t); }
     void NotifyOne(string nts,string nt) {
-        string m="NOTIFY * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nCACHE-CONTROL: max-age=1800\r\nLOCATION: http://"+Address+"/device.xml\r\nNT: "+nt+"\r\nNTS: "+nts+"\r\nSERVER: Windows/10.0 UPnP/1.0 DLNADOC/1.50 EcoMediaServer/0.4\r\nUSN: "+Usn(nt)+"\r\nBOOTID.UPNP.ORG: 1\r\nCONFIGID.UPNP.ORG: 1\r\n\r\n";
+        string m="NOTIFY * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nCACHE-CONTROL: max-age=1800\r\nLOCATION: http://"+Address+"/device.xml\r\nNT: "+nt+"\r\nNTS: "+nts+"\r\nSERVER: Windows/10.0 UPnP/1.0 DLNADOC/1.50 EcoMediaServer/"+Version+"\r\nUSN: "+Usn(nt)+"\r\nBOOTID.UPNP.ORG: 1\r\nCONFIGID.UPNP.ORG: 1\r\n\r\n";
         byte[] b=Encoding.ASCII.GetBytes(m);
         using(var u=new UdpClient(new IPEndPoint(IPAddress.Parse(host),0))) { u.MulticastLoopback=false; u.Send(b,b.Length,new IPEndPoint(IPAddress.Parse("239.255.255.250"),1900)); }
     }
-    static string Mime(string e) { switch(e.ToLowerInvariant()){case ".mp4":case ".m4v":return "video/mp4";case ".mkv":return "video/x-matroska";case ".avi":return "video/x-msvideo";case ".mpg":case ".mpeg":case ".ts":case ".m2ts":return "video/mpeg";case ".mp3":return "audio/mpeg";case ".flac":return "audio/flac";case ".wav":return "audio/wav";case ".jpg":case ".jpeg":return "image/jpeg";case ".png":return "image/png";default:return "application/octet-stream";} }
+    // File extension to HTTP media type mapping.
+    static string Mime(string e) { switch(e.ToLowerInvariant()){case ".mp4":case ".m4v":return "video/mp4";case ".mov":return "video/quicktime";case ".mkv":return "video/x-matroska";case ".avi":return "video/x-msvideo";case ".mpg":case ".mpeg":case ".ts":case ".m2ts":return "video/mpeg";case ".mp3":return "audio/mpeg";case ".flac":return "audio/flac";case ".wav":return "audio/wav";case ".jpg":case ".jpeg":return "image/jpeg";case ".png":return "image/png";default:return "application/octet-stream";} }
     public void Dispose(){ Running=false; try{Notify("ssdp:byebye");}catch{} try{http.Stop();}catch{} try{ssdp.Close();}catch{} try{cts.Cancel();}catch{} Log("SERVER STOPPED"); }
 }
 '@
+# Compile the embedded server engine before loading the WPF window.
 try { Add-Type -TypeDefinition $engine -Language CSharp -ErrorAction Stop } catch { [System.Windows.MessageBox]::Show("The server engine could not be compiled.`n`n$($_.Exception.Message)","Eco Media Server"); return }
 
+# WPF window layout and visual styling.
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  Title="Eco Media Server" Width="1180" Height="760" MinWidth="900" MinHeight="620" WindowStartupLocation="CenterScreen"
@@ -293,7 +357,6 @@ try { Add-Type -TypeDefinition $engine -Language CSharp -ErrorAction Stop } catc
    <StackPanel Orientation="Horizontal" Margin="24,12"><TextBlock Text="▷" FontSize="44" Foreground="{StaticResource Accent}" Margin="0,-6,18,0"/><StackPanel><TextBlock Text="ECO MEDIA SERVER" FontFamily="Cascadia Mono" FontSize="25" FontWeight="Bold" Foreground="{StaticResource Accent}"/><TextBlock Text="LOCAL MEDIA TRANSMISSION SYSTEM" FontFamily="Cascadia Mono" FontSize="11" Foreground="{StaticResource Muted}"/></StackPanel></StackPanel>
    <StackPanel Grid.Column="1" Orientation="Horizontal"><Button x:Name="MinButton" Content="—" Width="52" BorderThickness="0" Background="Transparent"/><Button x:Name="CloseButton" Content="×" FontSize="22" Width="52" BorderThickness="0" Background="Transparent"/></StackPanel>
   </Grid>
-  <Grid Grid.Row="1"><TextBlock x:Name="TopStatus" Text="ONLINE" Visibility="Collapsed"/></Grid>
   <!-- content -->
   <Grid Grid.Row="2" Margin="20,18,20,14"><Grid.RowDefinitions><RowDefinition Height="190"/><RowDefinition Height="12"/><RowDefinition Height="*"/></Grid.RowDefinitions>
    <Border x:Name="DropZone" BorderBrush="{StaticResource Accent}" BorderThickness="1" CornerRadius="6" Background="#97101D1F"><StackPanel VerticalAlignment="Center"><TextBlock Text="⇩" FontSize="46" HorizontalAlignment="Center" Foreground="{StaticResource Accent}"/><TextBlock Text="DROP MEDIA HERE" FontFamily="Cascadia Mono" FontSize="26" FontWeight="Bold" HorizontalAlignment="Center" Foreground="{StaticResource Accent}"/><TextBlock Text="Files or folders" HorizontalAlignment="Center" Foreground="#A2BBB8" Margin="0,4,0,15"/><Button x:Name="BrowseButton" Content="SELECT FILES" HorizontalAlignment="Center" Width="240"/></StackPanel></Border>
@@ -319,9 +382,10 @@ try { Add-Type -TypeDefinition $engine -Language CSharp -ErrorAction Stop } catc
 </Window>
 '@
 
+# Bind named controls from XAML and create the server instance.
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
-$names = 'TitleBar','MinButton','CloseButton','DropZone','BrowseButton','MediaList','ItemsHeader','SizeHeader','AddressText','CountText','ClearButton','FooterText','TopStatus'
+$names = 'TitleBar','MinButton','CloseButton','DropZone','BrowseButton','MediaList','ItemsHeader','SizeHeader','AddressText','CountText','ClearButton','FooterText'
 foreach($n in $names){ Set-Variable -Name $n -Value $window.FindName($n) }
 $server = New-Object EcoDlnaServerScan
 if ($null -eq $server) {
@@ -329,6 +393,7 @@ if ($null -eq $server) {
     return
 }
 
+# UI helpers for formatting, refreshing the catalog, and adding files or folders.
 function Format-Bytes([long]$n) { if($n -ge 1GB){'{0:N1} GB' -f ($n/1GB)} elseif($n -ge 1MB){'{0:N1} MB' -f ($n/1MB)} elseif($n -ge 1KB){'{0:N1} KB' -f ($n/1KB)} else{"$n B"} }
 function Refresh-List {
     $MediaList.Items.Clear()
@@ -340,6 +405,7 @@ function Add-Path([string]$p) {
     elseif([IO.Directory]::Exists($p)){ Get-ChildItem -LiteralPath $p -File -Recurse -ErrorAction SilentlyContinue | Where-Object Extension -match '^\.(mkv|mp4|m4v|avi|mov|mpg|mpeg|ts|m2ts|mp3|flac|wav|jpg|jpeg|png)$' | ForEach-Object {$server.Add($_.FullName)} }
 }
 
+# Start the server and display its address when startup succeeds.
 try {
     $server.Start(5080)
 }
@@ -352,6 +418,7 @@ catch {
 if ($null -ne $AddressText -and $server.Running) {
     $AddressText.Text = $server.Address
 }
+# Wire window controls, file selection, drag-and-drop, and media-list actions.
 $TitleBar.Add_MouseLeftButtonDown({ if($_.ClickCount -eq 2){if($window.WindowState -eq 'Maximized'){$window.WindowState='Normal'}else{$window.WindowState='Maximized'}}else{$window.DragMove()} })
 $MinButton.Add_Click({$window.WindowState='Minimized'}); $CloseButton.Add_Click({$window.Close()})
 $BrowseButton.Add_Click({ $d=New-Object Microsoft.Win32.OpenFileDialog; $d.Multiselect=$true; $d.Filter='Media files|*.mkv;*.mp4;*.m4v;*.avi;*.mov;*.mpg;*.mpeg;*.ts;*.m2ts;*.mp3;*.flac;*.wav;*.jpg;*.jpeg;*.png|All files|*.*'; if($d.ShowDialog()){$d.FileNames|%{Add-Path $_};Refresh-List} })
@@ -361,6 +428,7 @@ $window.Add_Drop({$DropZone.Background='#97101D1F'; if($_.Data.GetDataPresent([W
 $MediaList.AddHandler([Windows.Controls.Button]::ClickEvent,[Windows.RoutedEventHandler]{param($sender,$e);$button=$e.OriginalSource;if($button -is [Windows.Controls.Button] -and $button.Tag){$server.Remove([string]$button.Tag);Refresh-List;$e.Handled=$true}})
 $MediaList.Add_KeyDown({if($_.Key -eq [Windows.Input.Key]::Delete){$ids=@($MediaList.SelectedItems|ForEach-Object{$_.Id});foreach($id in $ids){$server.Remove([string]$id)};if($ids.Count){Refresh-List};$_.Handled=$true}})
 $ClearButton.Add_Click({if($server.ItemCount -eq 0){return};$answer=[System.Windows.MessageBox]::Show("Stop sharing all $($server.ItemCount) items?`n`nFiles on disk will not be deleted.",'Eco Media Server',[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Question);if($answer -eq [System.Windows.MessageBoxResult]::Yes){foreach($i in $server.Snapshot()){$server.Remove($i.Id)};Refresh-List}})
+# Refresh the footer log periodically and stop background services on window close.
 $timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromMilliseconds(700); $timer.Add_Tick({$l=$server.DrainLogs();if($l.Count){$FooterText.Text='■  '+$l[-1]}});$timer.Start()
 $window.Add_Closing({$timer.Stop();$server.Dispose()})
 [void]$window.ShowDialog()
