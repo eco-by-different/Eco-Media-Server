@@ -104,8 +104,6 @@ public sealed class EcoDlnaServerScan : IDisposable {
     readonly ConcurrentQueue<string> logs = new ConcurrentQueue<string>();
     TcpListener http;
     UdpClient ssdp;
-    CancellationTokenSource cts;
-    Thread httpThread, ssdpThread, notifyThread;
     string host;
     int port;
     readonly string uuid = StableUuid();
@@ -131,17 +129,17 @@ public sealed class EcoDlnaServerScan : IDisposable {
 
     public void Start(int requestedPort) {
         if (Running) return;
-        host = FindIPv4(); port = requestedPort; cts = new CancellationTokenSource();
+        host = FindIPv4(); port = requestedPort;
         http = new TcpListener(IPAddress.Parse(host), port);
         http.Start();
         Running=true;
-        httpThread=new Thread(HttpLoop){IsBackground=true}; httpThread.Start();
+        var httpThread=new Thread(HttpLoop){IsBackground=true}; httpThread.Start();
         try {
             ssdp = new UdpClient(); ssdp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
             ssdp.Client.Bind(new IPEndPoint(IPAddress.Any,1900));
             ssdp.JoinMulticastGroup(IPAddress.Parse("239.255.255.250"), IPAddress.Parse(host));
-            ssdpThread=new Thread(SsdpLoop){IsBackground=true}; ssdpThread.Start();
-            notifyThread=new Thread(NotifyLoop){IsBackground=true}; notifyThread.Start();
+            var ssdpThread=new Thread(SsdpLoop){IsBackground=true}; ssdpThread.Start();
+            var notifyThread=new Thread(NotifyLoop){IsBackground=true}; notifyThread.Start();
         } catch(Exception ex) { Log("SSDP WARNING  " + ex.Message); }
         Log("SERVER ONLINE  " + Address);
     }
@@ -328,7 +326,7 @@ public sealed class EcoDlnaServerScan : IDisposable {
     }
     // File extension to HTTP media type mapping.
     static string Mime(string e) { switch(e.ToLowerInvariant()){case ".mp4":case ".m4v":return "video/mp4";case ".mov":return "video/quicktime";case ".mkv":return "video/x-matroska";case ".avi":return "video/x-msvideo";case ".mpg":case ".mpeg":case ".ts":case ".m2ts":return "video/mpeg";case ".mp3":return "audio/mpeg";case ".flac":return "audio/flac";case ".wav":return "audio/wav";case ".jpg":case ".jpeg":return "image/jpeg";case ".png":return "image/png";default:return "application/octet-stream";} }
-    public void Dispose(){ Running=false; try{Notify("ssdp:byebye");}catch{} try{http.Stop();}catch{} try{ssdp.Close();}catch{} try{cts.Cancel();}catch{} Log("SERVER STOPPED"); }
+    public void Dispose(){ Running=false; try{Notify("ssdp:byebye");}catch{} try{http.Stop();}catch{} try{ssdp.Close();}catch{} Log("SERVER STOPPED"); }
 }
 '@
 # Compile the embedded server engine before loading the WPF window.
@@ -346,9 +344,9 @@ try { Add-Type -TypeDefinition $engine -Language CSharp -ErrorAction Stop } catc
  </Window.Resources>
  <Border BorderBrush="#265A58" BorderThickness="1" CornerRadius="8" Background="#071011">
  <Grid>
-  <Grid.RowDefinitions><RowDefinition Height="76"/><RowDefinition Height="0"/><RowDefinition Height="*"/><RowDefinition Height="104"/><RowDefinition Height="36"/></Grid.RowDefinitions>
+  <Grid.RowDefinitions><RowDefinition Height="76"/><RowDefinition Height="*"/><RowDefinition Height="104"/><RowDefinition Height="36"/></Grid.RowDefinitions>
   <!-- watermark -->
-  <Grid Grid.RowSpan="5" IsHitTestVisible="False" Opacity="0.085" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-150,-170" Width="700" Height="700">
+  <Grid Grid.RowSpan="4" IsHitTestVisible="False" Opacity="0.085" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-150,-170" Width="700" Height="700">
    <Ellipse Stroke="#43DDAE" StrokeThickness="3" Margin="30"/><Ellipse Stroke="#43DDAE" StrokeThickness="1" StrokeDashArray="4,9" Margin="72"/>
    <StackPanel VerticalAlignment="Center"><TextBlock Text="ECO" FontFamily="Cascadia Mono" FontSize="150" FontWeight="Bold" Foreground="#43DDAE" HorizontalAlignment="Center"/><TextBlock Text="MEDIA SERVER" FontFamily="Cascadia Mono" FontSize="30" Foreground="#43DDAE" HorizontalAlignment="Center"/></StackPanel>
   </Grid>
@@ -358,7 +356,7 @@ try { Add-Type -TypeDefinition $engine -Language CSharp -ErrorAction Stop } catc
    <StackPanel Grid.Column="1" Orientation="Horizontal"><Button x:Name="MinButton" Content="—" Width="52" BorderThickness="0" Background="Transparent"/><Button x:Name="CloseButton" Content="×" FontSize="22" Width="52" BorderThickness="0" Background="Transparent"/></StackPanel>
   </Grid>
   <!-- content -->
-  <Grid Grid.Row="2" Margin="20,18,20,14"><Grid.RowDefinitions><RowDefinition Height="190"/><RowDefinition Height="12"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+  <Grid Grid.Row="1" Margin="20,18,20,14"><Grid.RowDefinitions><RowDefinition Height="190"/><RowDefinition Height="12"/><RowDefinition Height="*"/></Grid.RowDefinitions>
    <Border x:Name="DropZone" BorderBrush="{StaticResource Accent}" BorderThickness="1" CornerRadius="6" Background="#97101D1F"><StackPanel VerticalAlignment="Center"><TextBlock Text="⇩" FontSize="46" HorizontalAlignment="Center" Foreground="{StaticResource Accent}"/><TextBlock Text="DROP MEDIA HERE" FontFamily="Cascadia Mono" FontSize="26" FontWeight="Bold" HorizontalAlignment="Center" Foreground="{StaticResource Accent}"/><TextBlock Text="Files or folders" HorizontalAlignment="Center" Foreground="#A2BBB8" Margin="0,4,0,15"/><Button x:Name="BrowseButton" Content="SELECT FILES" HorizontalAlignment="Center" Width="240"/></StackPanel></Border>
    <Border Grid.Row="2" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="6" Background="#B0071112"><Grid><Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition Height="*"/></Grid.RowDefinitions><Grid Grid.Row="0"><TextBlock x:Name="ItemsHeader" Text="SHARED ITEMS ( 0 )" Margin="14,13" FontFamily="Cascadia Mono" Foreground="{StaticResource Accent}"/><TextBlock x:Name="SizeHeader" Text="TOTAL SIZE: 0 B" HorizontalAlignment="Right" Margin="0,13,16,0" FontFamily="Cascadia Mono" Foreground="#91A7A5"/></Grid><DataGrid x:Name="MediaList" Grid.Row="1" AutoGenerateColumns="False" CanUserAddRows="False" CanUserDeleteRows="False" CanUserResizeRows="False" IsReadOnly="True" SelectionMode="Extended" SelectionUnit="FullRow" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#183638" RowHeight="27" ColumnHeaderHeight="30" RowBackground="#70071112" AlternatingRowBackground="#70101C1E" Background="Transparent" BorderThickness="0" Foreground="#DDE9E7" FontFamily="Cascadia Mono">
 <DataGrid.Resources>
@@ -376,8 +374,8 @@ try { Add-Type -TypeDefinition $engine -Language CSharp -ErrorAction Stop } catc
 </DataGrid.Columns></DataGrid></Grid></Border>
   </Grid>
   <!-- server details -->
-  <Border Grid.Row="3" Margin="20,0" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="6" Background="#B0081213"><Grid Margin="20,14"><Grid.ColumnDefinitions><ColumnDefinition Width="250"/><ColumnDefinition Width="*"/><ColumnDefinition Width="220"/></Grid.ColumnDefinitions><StackPanel><TextBlock Text="SERVER" FontFamily="Cascadia Mono" Foreground="{StaticResource Accent}"/><StackPanel Orientation="Horizontal" Margin="0,15,0,0"><Ellipse Width="24" Height="24" Fill="{StaticResource Accent}" Margin="0,0,14,0"/><StackPanel><TextBlock Text="ONLINE" FontFamily="Cascadia Mono" FontSize="18" Foreground="{StaticResource Accent}"/></StackPanel></StackPanel></StackPanel><Grid Grid.Column="1"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions><StackPanel><TextBlock Text="Address (IPv4)" Foreground="#78908E"/><TextBlock x:Name="AddressText" Text="Starting..." FontFamily="Cascadia Mono" Margin="0,5,0,12"/></StackPanel><StackPanel Grid.Column="1"><TextBlock Text="Shared items" Foreground="#78908E"/><TextBlock x:Name="CountText" Text="0" FontFamily="Cascadia Mono" Margin="0,5,0,12"/></StackPanel></Grid><StackPanel Grid.Column="2" VerticalAlignment="Center"><Button x:Name="ClearButton" Content="CLEAR SHARED ITEMS" Height="38"/></StackPanel></Grid></Border>
-  <Grid Grid.Row="4" Background="#091314"><TextBlock x:Name="FooterText" Text="■  READY   |   Waiting for media..." Margin="22,10" FontFamily="Cascadia Mono" FontSize="11" Foreground="#86A09D"/><TextBlock Text="LOCAL  |  PRIVATE  |  NO CLOUD" HorizontalAlignment="Right" Margin="0,10,20,0" FontFamily="Cascadia Mono" FontSize="10" Foreground="#617875"/></Grid>
+  <Border Grid.Row="2" Margin="20,0" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="6" Background="#B0081213"><Grid Margin="20,14"><Grid.ColumnDefinitions><ColumnDefinition Width="250"/><ColumnDefinition Width="*"/><ColumnDefinition Width="220"/></Grid.ColumnDefinitions><StackPanel><TextBlock Text="SERVER" FontFamily="Cascadia Mono" Foreground="{StaticResource Accent}"/><StackPanel Orientation="Horizontal" Margin="0,15,0,0"><Ellipse Width="24" Height="24" Fill="{StaticResource Accent}" Margin="0,0,14,0"/><StackPanel><TextBlock Text="ONLINE" FontFamily="Cascadia Mono" FontSize="18" Foreground="{StaticResource Accent}"/></StackPanel></StackPanel></StackPanel><Grid Grid.Column="1"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions><StackPanel><TextBlock Text="Address (IPv4)" Foreground="#78908E"/><TextBlock x:Name="AddressText" Text="Starting..." FontFamily="Cascadia Mono" Margin="0,5,0,12"/></StackPanel><StackPanel Grid.Column="1"><TextBlock Text="Shared items" Foreground="#78908E"/><TextBlock x:Name="CountText" Text="0" FontFamily="Cascadia Mono" Margin="0,5,0,12"/></StackPanel></Grid><StackPanel Grid.Column="2" VerticalAlignment="Center"><Button x:Name="ClearButton" Content="CLEAR SHARED ITEMS" Height="38"/></StackPanel></Grid></Border>
+  <Grid Grid.Row="3" Background="#091314"><TextBlock x:Name="FooterText" Text="■  READY   |   Waiting for media..." Margin="22,10" FontFamily="Cascadia Mono" FontSize="11" Foreground="#86A09D"/><TextBlock Text="LOCAL  |  PRIVATE  |  NO CLOUD" HorizontalAlignment="Right" Margin="0,10,20,0" FontFamily="Cascadia Mono" FontSize="10" Foreground="#617875"/></Grid>
  </Grid></Border>
 </Window>
 '@
